@@ -1,4 +1,4 @@
 aiogram==3.4.1
 mysql-connector-python==8.3.0
-pydantic==2.14.6
-pydantic-core==1.10.7
+pydantic
+pydantic-core

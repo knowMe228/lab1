@@ -1,0 +1,5 @@
+services:
+  - type: web
+    name: my-todo-app
+    env: python
+    pythonVersion: "3.10"  # или "3.11"

@@ -2,86 +2,159 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const mysql = require('mysql2/promise');
+const url = require('url');
+const cookie = require('cookie');
 
 const PORT = 3000;
 
-// Database connection settings
 const dbConfig = {
-    host: 'localhost',
-    user: 'root',
-    password: '',
-    database: 'todolist',
-  };
+  host: 'localhost',
+  user: 'root',
+  password: 'root',
+  database: 'todolist',
+};
 
+async function retrieveListItems() {
+  const connection = await mysql.createConnection(dbConfig);
+  const [rows] = await connection.execute('SELECT id, text FROM items');
+  await connection.end();
+  return rows;
+}
 
-  async function retrieveListItems() {
-    try {
-      // Create a connection to the database
-      const connection = await mysql.createConnection(dbConfig);
-      
-      // Query to select all items from the database
-      const query = 'SELECT id, text FROM items';
-      
-      // Execute the query
-      const [rows] = await connection.execute(query);
-      
-      // Close the connection
-      await connection.end();
-      
-      // Return the retrieved items as a JSON array
-      return rows;
-    } catch (error) {
-      console.error('Error retrieving list items:', error);
-      throw error; // Re-throw the error
+async function getHtmlRows() {
+  const rows = await retrieveListItems();
+  return rows.map((item, index) => `
+    <tr>
+      <td>${index + 1}</td>
+      <td>${item.text}</td>
+      <td>
+        <button onclick="editItem(${item.id})">редактировать</button>
+        <button onclick="deleteItem(${item.id})">удалить</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+async function addItemToDb(text) {
+  const connection = await mysql.createConnection(dbConfig);
+  const [result] = await connection.execute('INSERT INTO items (text) VALUES (?)', [text]);
+  await connection.end();
+  return { id: result.insertId, text };
+}
+
+async function deleteItemFromDb(id) {
+  const connection = await mysql.createConnection(dbConfig);
+  await connection.execute('DELETE FROM items WHERE id = ?', [id]);
+  await connection.end();
+}
+
+async function updateItemInDb(id, newText) {
+  const connection = await mysql.createConnection(dbConfig);
+  await connection.execute('UPDATE items SET text = ? WHERE id = ?', [newText, id]);
+  await connection.end();
+}
+
+const server = http.createServer(async (req, res) => {
+  const parsedUrl = url.parse(req.url, true);
+  const cookies = cookie.parse(req.headers.cookie || '');
+  const isLoggedIn = cookies.auth === 'admin';
+
+  // === LOGIN PAGE ===
+  if (req.method === 'GET' && parsedUrl.pathname === '/login') {
+    const loginPage = fs.readFileSync(path.join(__dirname, 'login.html'));
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    return res.end(loginPage);
+  }
+
+  if (req.method === 'POST' && parsedUrl.pathname === '/login') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      const params = new URLSearchParams(body);
+      const username = params.get('username');
+      const password = params.get('password');
+
+      if (username === 'admin' && password === 'admin') {
+        res.writeHead(302, {
+          'Set-Cookie': cookie.serialize('auth', 'admin', { httpOnly: true }),
+          'Location': '/'
+        });
+        return res.end();
+      } else {
+        res.writeHead(401);
+        return res.end('Unauthorized');
+      }
+    });
+    return;
+  }
+
+  // === AUTH CHECK ===
+  if (!isLoggedIn) {
+    res.writeHead(302, { Location: '/login' });
+    return res.end();
+  }
+
+  // === MAIN PAGE ===
+  if (req.method === 'GET' && parsedUrl.pathname === '/') {
+    const htmlPath = path.join(__dirname, 'index.html');
+    let html = fs.readFileSync(htmlPath, 'utf8');
+    const rows = await getHtmlRows();
+    html = html.replace('{{rows}}', rows);
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    return res.end(html);
+  }
+
+  // === ADD ITEM ===
+  if (req.method === 'POST' && parsedUrl.pathname === '/add-item') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      const { text } = JSON.parse(body);
+      const result = await addItemToDb(text);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, item: result }));
+    });
+    return;
+  }
+
+  // === DELETE ITEM ===
+  if (req.method === 'DELETE' && parsedUrl.pathname.startsWith('/delete-item/')) {
+    const id = parsedUrl.pathname.split('/').pop();
+    await deleteItemFromDb(id);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ success: true }));
+  }
+
+  // === EDIT ITEM ===
+  if (req.method === 'PUT' && parsedUrl.pathname.startsWith('/edit-item/')) {
+    const id = parsedUrl.pathname.split('/').pop();
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      const { text } = JSON.parse(body);
+      await updateItemInDb(id, text);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true }));
+    });
+    return;
+  }
+
+  // === STATIC FILES ===
+  if (req.method === 'GET') {
+    const filePath = path.join(__dirname, parsedUrl.pathname);
+    if (fs.existsSync(filePath)) {
+      const ext = path.extname(filePath).toLowerCase();
+      const contentType = ext === '.js' ? 'text/javascript' : 'text/plain';
+      res.writeHead(200, { 'Content-Type': contentType });
+      return res.end(fs.readFileSync(filePath));
     }
   }
 
-// Stub function for generating HTML rows
-async function getHtmlRows() {
-    // Example data - replace with actual DB data later
-    /*
-    const todoItems = [
-        { id: 1, text: 'First todo item' },
-        { id: 2, text: 'Second todo item' }
-    ];*/
+  // === 404 ===
+  res.writeHead(404);
+  res.end('Not Found');
+});
 
-    const todoItems = await retrieveListItems();
-
-    // Generate HTML for each item
-    return todoItems.map(item => `
-        <tr>
-            <td>${item.id}</td>
-            <td>${item.text}</td>
-            <td><button class="delete-btn">×</button></td>
-        </tr>
-    `).join('');
-}
-
-// Modified request handler with template replacement
-async function handleRequest(req, res) {
-    if (req.url === '/') {
-        try {
-            const html = await fs.promises.readFile(
-                path.join(__dirname, 'index.html'), 
-                'utf8'
-            );
-            
-            // Replace template placeholder with actual content
-            const processedHtml = html.replace('{{rows}}', await getHtmlRows());
-            
-            res.writeHead(200, { 'Content-Type': 'text/html' });
-            res.end(processedHtml);
-        } catch (err) {
-            console.error(err);
-            res.writeHead(500, { 'Content-Type': 'text/plain' });
-            res.end('Error loading index.html');
-        }
-    } else {
-        res.writeHead(404, { 'Content-Type': 'text/plain' });
-        res.end('Route not found');
-    }
-}
-
-// Create and start server
-const server = http.createServer(handleRequest);
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`Server is running on http://localhost:${PORT}`);
+});

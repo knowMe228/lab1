@@ -1,4 +1,4 @@
-
+CREATE DATABASE IF NOT EXISTS todolist;
 USE todolist;
 
 CREATE TABLE items (
